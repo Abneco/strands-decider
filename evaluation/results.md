@@ -279,3 +279,58 @@ python evaluation/jevbench/jevbench_cold_warm.py split doubled.jsonl OUT/results
 
 `split` writes `cold.jsonl` and `warm.jsonl`. Each is summarised against the unmodified
 public task file, and `split` refuses a pair whose two requests differ in length.
+
+## Serving on a Mac through MLX: accuracy and latency
+
+Measured with v19 on an M4 Pro (20-core GPU, 48 GB), bf16 on both devices: torch 2.7.1 and
+transformers 5.18.0 for MPS, mlx 0.32.3 for MLX. All MLX figures are from mlx-lm 0.32.0, the version the extra requires. The
+setup is in [Serving on a Mac with MLX](../docs/inference.md#serving-on-a-mac-with-mlx).
+JevBench was not run on MLX.
+
+**The answers are the same.** `evaluation/device_parity.py` asks 54 questions: three tickets,
+three state lengths from about 40 to about 3,000 tokens, one and five questions per request,
+and every question type. It runs them on the CPU in fp32 as the reference, then on each other
+device. No chosen answer changes. The largest probability differences against that reference:
+
+| run | max \|Δp\| |
+| --- | --- |
+| MPS, adapter unmerged (the torch engine) | 0.0051 |
+| MPS, adapter merged on the CPU before the move, as the MLX engine merges it | 0.0105 |
+| MLX in fp32 | 0.0036 |
+| MLX in bf16 (`--device mlx`) | 0.0138 |
+
+The two middle rows were one-off runs with the change named. Merging the adapter into bf16
+weights accounts for most of MLX's difference. The README's multi-question example gives noul
+0.831 and `billing` 0.846 (confidence 0.769), against 0.829 and 0.846 (0.769) recorded there.
+
+**Latency: 1.4 to 1.6x faster than MPS.** From `evaluation/bench_local.py`,
+medians over 7 warm runs for one question and 5 for several:
+
+| state tokens | input tokens | questions | path | MPS | MLX |
+| --- | --- | --- | --- | --- | --- |
+| 128 | 222 | 1 | whole prompt | 162 ms | 113 ms |
+| 1,024 | 1,118 | 1 | whole prompt | 682 ms | 486 ms |
+| 4,000 | 4,094 | 1 | whole prompt | 2,685 ms | 1,764 ms |
+| 256 | 605 | 4 | shared prefix | 474 ms | 299 ms |
+| 256 | 1,639 | 16 | shared prefix | 1,154 ms | 723 ms |
+| 1,024 | 1,373 | 4 | shared prefix | 907 ms | 627 ms |
+| 1,024 | 2,407 | 16 | shared prefix | 1,622 ms | 1,060 ms |
+| 1,024 | 17,902 | 16 | batched | 11,542 ms | 7,396 ms |
+
+The batched comparison stops at 1,024-token states to bound memory: at 2,048 tokens and 16
+questions it is one 34,000-token batch.
+
+**Memory per request is lower on MLX.** MLX's peak (`mx.get_peak_memory`, reset before each
+shape) runs from 3.8 GiB to 4.9 GiB over these requests; the MPS driver's allocation runs from
+4.2 GiB to 6.3 GiB, and to 9.5 GiB for 16 batched 1,024-token prompts, where MLX peaks at
+4.9 GiB. Loading peaks at 3.7 GiB on MLX, while the adapter is merged.
+
+```bash
+python evaluation/bench_local.py StrandsAgents/strands-decider-2B-hobson-v19 --device mps \
+  --device mlx --lengths 128,1024,4000 --questions 1 --reps 7 --out single.csv
+python evaluation/bench_local.py StrandsAgents/strands-decider-2B-hobson-v19 --device mps \
+  --device mlx --lengths 256,1024 --questions 4,16 --reps 5 --out multi.csv
+python evaluation/device_parity.py StrandsAgents/strands-decider-2B-hobson-v19 \
+  --device cpu --device mps --device mlx --out parity.json
+```
+

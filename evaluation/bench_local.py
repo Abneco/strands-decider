@@ -7,6 +7,7 @@ the real one on MPS and CUDA alike). For multi-question requests it times both t
 shared-prefix path and plain batched encoding, and checks they give the same answers.
 
     python evaluation/bench_local.py checkpoints/hobson-2b-v19 --device mps
+    python evaluation/bench_local.py checkpoints/hobson-2b-v19 --device mps --device mlx
     python evaluation/bench_local.py checkpoints/hobson-2b-v19 --device cpu \
         --lengths 256,1024 --questions 1,8 --reps 3
 
@@ -73,7 +74,19 @@ def make_questions(k: int) -> dict[str, ChoiceQuestion]:
     }
 
 
+def reset_peak_mem(device: str) -> None:
+    """Start MLX's peak counter at this request shape; it otherwise holds the load-time peak."""
+    if device == "mlx":
+        import mlx.core as mx
+
+        mx.reset_peak_memory()
+
+
 def peak_mem_gib(device: str) -> float:
+    if device == "mlx":
+        import mlx.core as mx
+
+        return float(mx.get_peak_memory()) / 2**30
     if device == "mps":
         return torch.mps.driver_allocated_memory() / 2**30
     if device.startswith("cuda"):
@@ -120,13 +133,16 @@ def main() -> int:
     for device in devices:
         t0 = time.perf_counter()
         engine = load_engine(args.checkpoint, device=device)
+        if args.dtype != "checkpoint" and device == "mlx":
+            raise SystemExit("--dtype applies to torch devices; the MLX torso runs in the checkpoint's dtype")
         if args.dtype != "checkpoint":
             # load_engine builds under inference_mode, so the cast must happen there too.
             with torch.inference_mode():
                 engine.model.torso.to(getattr(torch, args.dtype))
         load_s = time.perf_counter() - t0
         tok = engine.tok
-        dtype = next(engine.model.torso.parameters()).dtype
+        dtype = (engine.model.config.torch_dtype if device == "mlx"
+                 else next(engine.model.torso.parameters()).dtype)
         print(f"\n== {device}: loaded in {load_s:.1f}s, torch {torch.__version__}, "
               f"threads {torch.get_num_threads()}, torso {dtype}", flush=True)
 
@@ -146,6 +162,7 @@ def main() -> int:
                 answers = {}
                 for path in paths:
                     engine.cfg = replace(base_cfg, use_prefix_cache=(path == "prefix"))
+                    reset_peak_mem(device)
                     times, resp = time_request(engine, req, args.reps)
                     if path == "prefix" and not engine.cfg.use_prefix_cache:
                         # The engine fell back to batched encoding: record it, don't

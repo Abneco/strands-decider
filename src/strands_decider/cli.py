@@ -269,7 +269,7 @@ def eval_cmd(
 
 
 def _auto_device() -> str:
-    """Best available torch device: cuda > mps > cpu."""
+    """Best available torch device: cuda > mps > cpu. MLX is opt-in (`--device mlx`)."""
     if torch.cuda.is_available():
         return "cuda"
     if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
@@ -285,7 +285,7 @@ def _fmt_temperature(t: float | dict[str, float]) -> str:
 
 
 def _configure_inference_logging(device: str) -> None:
-    if str(device).split(":", 1)[0] in {"cpu", "mps"}:
+    if str(device).split(":", 1)[0] in {"cpu", "mps", "mlx"}:
         logging.getLogger("transformers.integrations.hub_kernels").setLevel(logging.ERROR)
 
 
@@ -299,7 +299,8 @@ def serve_cmd(
     port: int = typer.Option(8000),
     device: str | None = typer.Option(
         None, "--device",
-        help="Torch device (cuda|mps|cpu). Auto-detected when omitted.",
+        help="cuda, mps or cpu (torch), or mlx (Apple silicon, needs the mlx extra). "
+        "Auto-detected when omitted: cuda > mps > cpu; mlx only when asked for.",
     ),
     no_prefix_cache: bool = typer.Option(False, "--no-prefix-cache"),
     model_name: str | None = typer.Option(
@@ -319,7 +320,7 @@ def serve_cmd(
 
     selected_device = device or _auto_device()
     _configure_inference_logging(selected_device)
-    console.print(f"[green]serving[/] {checkpoint} on http://{host}:{port}")
+    console.print(f"[green]serving[/] {checkpoint} on http://{host}:{port} ({selected_device})")
     serve(
         checkpoint, host=host, port=port, device=selected_device,
         use_prefix_cache=not no_prefix_cache, model_name=model_name,
@@ -340,7 +341,8 @@ def ask_cmd(
     ),
     device: str | None = typer.Option(
         None, "--device",
-        help="Torch device (cuda|mps|cpu). Auto-detected when omitted.",
+        help="cuda, mps or cpu (torch), or mlx (Apple silicon, needs the mlx extra). "
+        "Auto-detected when omitted: cuda > mps > cpu; mlx only when asked for.",
     ),
     as_json: bool = typer.Option(False, "--json", help="Print the raw API response."),
 ) -> None:

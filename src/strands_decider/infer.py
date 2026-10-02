@@ -473,7 +473,43 @@ def load_engine(
     use_prefix_cache: bool = True,
     attn_implementation: str | None = None,
 ) -> SystemOneEngine:
+    """An engine on a torch device ("cuda", "mps", "cpu"), or on MLX with `device="mlx"`."""
+    if device == "mlx":
+        return load_mlx(checkpoint, EngineConfig(device="mlx", use_prefix_cache=use_prefix_cache))
     model = StrandsDeciderModel.load(checkpoint, attn_implementation=attn_implementation)
     return SystemOneEngine(
         model, EngineConfig(device=device, use_prefix_cache=use_prefix_cache)
     )
+
+
+def mlx_available() -> bool:
+    """True on Apple silicon with the `mlx` extra installed.
+
+    `mlx` is a namespace package: `pip uninstall mlx` can leave an importable `mlx`
+    directory behind (mlx-metal's), so the check is for `mlx.core`.
+    """
+    import importlib.util
+    import platform
+
+    # platform.system(), not sys.platform: mypy narrows sys.platform to the checking
+    # host's, which on CI's Linux runners marks the rest of the function unreachable.
+    if platform.system() != "Darwin" or platform.machine() != "arm64":
+        return False
+    try:
+        return (
+            importlib.util.find_spec("mlx.core") is not None
+            and importlib.util.find_spec("mlx_lm") is not None
+        )
+    except ModuleNotFoundError:  # finding `mlx.core` imports `mlx`, which may be absent
+        return False
+
+
+def load_mlx(checkpoint: str, config: EngineConfig | None = None) -> SystemOneEngine:
+    """An engine with the torso on MLX (see mlx_engine.py), configured as a torch engine is."""
+    if not mlx_available():
+        raise RuntimeError(
+            "device 'mlx' needs Apple silicon and the mlx extra: pip install 'strands-decider[mlx]'"
+        )
+    from .mlx_engine import load_mlx_engine
+
+    return load_mlx_engine(checkpoint, config)

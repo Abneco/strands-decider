@@ -5,7 +5,8 @@ from the command line, and serve it over HTTP. Strands decider answers typed que
 state, the text to classify; it does not generate text. A question is a `noul` (yes or no,
 returned as P(true)), a `choice` (one of N options) or a `score` (a level on an ordered
 scale). Install the package, point the commands at the published Hub id or at a checkpoint you
-trained, then `strands-decider ask` or `strands-decider serve`. Pass `--device cuda`, `mps` or `cpu` explicitly. A
+trained, then `strands-decider ask` or `strands-decider serve`. Pass `--device cuda`, `mps`, `cpu` or `mlx`
+explicitly; without it the CLI picks cuda, then mps, then cpu, and mlx only when asked for. A
 checkpoint from `training/recipe.sh all` is already calibrated; calibrate any other
 checkpoint with `strands-decider calibrate` before you serve it.
 
@@ -15,6 +16,7 @@ checkpoint with `strands-decider calibrate` before you serve it.
 - [Serve](#serve): `POST /v1/systemone` and `/health`, on `127.0.0.1` with no authentication.
 - [Asking many questions is nearly free](#asking-many-questions-is-nearly-free): the shared-prefix cache.
 - [Serving on a Mac](#serving-on-a-mac): MPS, and the one kernel that had to be replaced.
+- [Serving on a Mac with MLX](#serving-on-a-mac-with-mlx): `--device mlx`, measured against MPS.
 - [`../examples/strands/`](../examples/strands/README.md): an agent built with the Strands
   Agents SDK that uses the server, with its client in `_client.py`.
 - [`../evaluation/results.md`](../evaluation/results.md): measured latency and accuracy on an
@@ -35,6 +37,21 @@ environment in [Setup](../training/README.md#setup).
 A server started inside WSL (`strands-decider serve ... --port 8099`) is reachable from Windows
 at `127.0.0.1:8099` for as long as its WSL session is alive.
 
+Each device has an install extra, so a deployment names its device the same way everywhere. The
+extras ship with the next release (0.1.0 on PyPI has only `train` and `dev`); until then, install
+from a clone, for example `pip install -e ".[mlx]"`.
+
+| `--device` | Install | Adds |
+|---|---|---|
+| `cuda` | `pip install "strands-decider[cuda]"` | flash-linear-attention (Linux). causal-conv1d compiles against the local CUDA toolkit and is installed separately: `pip install causal-conv1d --no-build-isolation`. |
+| `mps` | `pip install "strands-decider[mps]"` | Nothing: the base install. |
+| `cpu` | `pip install "strands-decider[cpu]"` | Nothing: the base install. |
+| `mlx` | `pip install "strands-decider[mlx]"` | mlx and mlx-lm (Apple silicon only). |
+
+flash-linear-attention installs on a Mac without Triton, but its kernels need Triton, so it
+cannot run there. `mps_kernels.py` therefore steps aside only when Triton is present too, and
+the `cuda` extra is marked Linux-only.
+
 **Serving on macOS (Apple silicon), inference only.** No `flash-linear-attention`:
 Triton has no macOS build. Nothing else changes; pass `--device mps`.
 
@@ -49,6 +66,15 @@ strands-decider serve checkpoints/hobson-2b-recipe --device mps --port 8099
 Transformers' `causal_conv1d_fn` falls back to its reference PyTorch path. On CPU,
 `chunk_gated_delta_rule` also falls back. On MPS, `mps_kernels.py` replaces that second
 function, so only the first fallback matters there, and it costs 32 ms a forward.
+
+**macOS (Apple silicon) with MLX.** The `mlx` extra adds mlx and mlx-lm, and `--device mlx`
+runs the torso on Metal through mlx-lm ([Serving on a Mac with MLX](#serving-on-a-mac-with-mlx)).
+MLX is opt-in: with the extra installed, a command without `--device` still runs on MPS.
+
+```bash
+pip install -e ".[dev,mlx]"
+strands-decider serve checkpoints/hobson-2b-recipe --device mlx --port 8099
+```
 
 **CPU only.** The same commands as on macOS, with `--device cpu`. On Linux without a GPU,
 `pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu` skips the CUDA
@@ -247,3 +273,31 @@ random-input tests and was wrong by up to 5e8 on real activations. Correlated,
 l2-normalised keys make the powers of N huge before they cancel.
 `tests/test_mps_kernels.py` builds its inputs that way and fails 14 cases against that
 version.
+
+## Serving on a Mac with MLX
+
+`--device mlx` runs the torso on Apple silicon's GPU through mlx-lm
+([`mlx_engine.py`](../src/strands_decider/mlx_engine.py)). mlx-lm implements Qwen3.5 with fused
+Metal kernels, Gated DeltaNet included, where MPS dispatches every op separately and has none
+of the CUDA kernels. Nothing else moves: `MLXEngine` subclasses `SystemOneEngine`, so prompt
+rendering, tokenisation, truncation, option positions, both evaluation paths, the
+temperatures and the fp32 head are the torch engine's own code. The head runs on the CPU, as
+torch.
+
+Measured with v19 on an M4 Pro, one question takes 113 ms at 222 input tokens, 486 ms at 1,118
+and 1,764 ms at 4,094, against 162, 682 and 2,685 ms on MPS. Sixteen questions on a 1,024-token
+state take 1,060 ms against 1,622 ms. The answers are the same: on 54 answers compared with v19
+in fp32 on the CPU, none changes on either device, and the largest probability difference is
+0.0138 on MLX and 0.0051 on MPS. Most of MLX's difference comes from merging the LoRA adapter
+into the bf16 weights at load, where torch keeps it unmerged; with the torso in fp32 it is
+0.0036. On a tiny random Qwen3.5, `tests/test_mlx_engine.py` finds the torch engine's answers to
+four decimal places, on Metal and on MLX's CPU backend. The measurements, and the commands that reproduce them, are in
+[Serving on a Mac through MLX: accuracy and latency](../evaluation/results.md#serving-on-a-mac-through-mlx-accuracy-and-latency).
+
+Limits. mlx-lm is pinned to the minor version tested, because the engine uses its Qwen3.5
+module layout and prompt-cache classes. The adapter merge refuses DoRA, `modules_to_save`,
+trainable token embeddings, per-module ranks and quantised base weights. `--dtype` in
+`bench_local.py` applies to torch devices only. The engine caps MLX's buffer cache at 1 GiB
+(`mlx_engine.DEFAULT_CACHE_LIMIT`); MLX's own default is its memory limit, nearly all of RAM.
+Evaluations run one at a time, because `_fit` keeps a request's option offsets on the engine for
+`_option_idx` to read; the torch engine has the same race (#9).
