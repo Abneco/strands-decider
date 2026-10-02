@@ -33,6 +33,8 @@ def create_app(
     use_prefix_cache: bool = True,
     model_name: str | None = None,
     attn_implementation: str | None = None,
+    strict_window: bool = False,
+    max_batch: int = 32,
 ) -> FastAPI:
     global _engine
 
@@ -50,7 +52,8 @@ def create_app(
     _engine = SystemOneEngine(
         model,
         EngineConfig(
-            device=device, use_prefix_cache=use_prefix_cache, model_name=resolved_name
+            device=device, use_prefix_cache=use_prefix_cache, model_name=resolved_name,
+            strict_window=strict_window, max_batch=max_batch,
         ),
     )
 
@@ -94,6 +97,8 @@ def serve(
     device: str = "cuda",
     use_prefix_cache: bool = True,
     model_name: str | None = None,
+    strict_window: bool = False,
+    max_batch: int = 32,
 ) -> None:
     import uvicorn
 
@@ -102,6 +107,8 @@ def serve(
         device=device,
         use_prefix_cache=use_prefix_cache,
         model_name=model_name,
+        strict_window=strict_window,
+        max_batch=max_batch,
     )
     # Single worker: the model owns the GPU, and forking more would just duplicate it.
     uvicorn.run(app, host=host, port=port, workers=1)

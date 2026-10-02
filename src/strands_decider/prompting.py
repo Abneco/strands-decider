@@ -31,13 +31,15 @@ NOUL_DEFAULT_CRITERIA = {
 }
 
 
-def render_content(content: Content) -> str:
+def render_content(content: Content | None) -> str:
     """Flatten a state or instruction into text, stably.
 
     Dicts and lists are emitted as indented JSON rather than str() so that key
     order and unicode are deterministic -- the same state must always tokenise
     identically, otherwise the shared-prefix cache in infer.py would be unsound.
     """
+    if content is None:
+        return ""
     if isinstance(content, str):
         return content.strip()
     return json.dumps(content, indent=2, ensure_ascii=False, sort_keys=False)
@@ -99,11 +101,11 @@ def render_question(
 
     if isinstance(question, NoulQuestion):
         crit = {**NOUL_DEFAULT_CRITERIA, **(question.criteria or {})}
-        pairs = [(lbl, crit[lbl]) for lbl in NOUL_SLOT_LABELS]
+        pairs = [(lbl, render_content(crit[lbl])) for lbl in NOUL_SLOT_LABELS]
         kind = "noul"
         header = "Decide whether the statement is true of the state."
     elif isinstance(question, ChoiceQuestion):
-        pairs = list(question.criteria.items())
+        pairs = [(name, render_content(desc)) for name, desc in question.criteria.items()]
         kind = "choice"
         header = "Select exactly one option."
     elif isinstance(question, ScoreQuestion):
