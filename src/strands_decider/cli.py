@@ -183,6 +183,22 @@ def train_cmd(
     train(cfg)
 
 
+@app.command("soup", hidden=True)
+def soup_cmd(
+    checkpoints: list[str] = typer.Argument(..., help="Checkpoints of one recipe (other seeds)."),
+    out: str = typer.Option(..., "--out", help="Directory for the souped checkpoint: absent or empty."),
+    replace: bool = typer.Option(False, "--replace", help="Delete what --out holds first."),
+) -> None:
+    """Average same-recipe checkpoints by their LoRA updates and head logits (soup.py).
+
+    The soup's temperatures are reset: run `calibrate` on it next.
+    """
+    from .soup import soup
+
+    soup(checkpoints, out, replace=replace)
+    console.print(f"[green]soup of {len(checkpoints)} checkpoints -> {out}[/] (calibrate it next)")
+
+
 @app.command("calibrate", hidden=True)
 def calibrate_cmd(
     checkpoint: str = typer.Argument(...),
