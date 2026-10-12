@@ -7,6 +7,9 @@ drift in field names or types would break that without failing any model test.
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -226,6 +229,57 @@ def test_real_create_app_routes_work(monkeypatch):
     assert body["answers"]["is_urgent"]["type"] == "noul"
     # The server adds its own timing field on top of the API response.
     assert "latency_ms" in body
+
+
+def test_concurrent_requests_do_not_enter_engine_in_parallel(monkeypatch):
+    """Tests concurrent requests."""
+    enter = threading.Event()
+    release = threading.Event()
+    inside = 0
+    peak = 0
+    lock = threading.Lock()
+
+    class _RacingEngine(_StubEngine):
+        def evaluate(self, request):
+            nonlocal inside, peak
+            with lock:
+                inside += 1
+                peak = max(peak, inside)
+            enter.set()
+            # Hold inside the engine long enough that a second request can race in.
+            release.wait(timeout=2.0)
+            try:
+                return super().evaluate(request)
+            finally:
+                with lock:
+                    inside -= 1
+
+    monkeypatch.setattr(server.StrandsDeciderModel, "load", classmethod(lambda cls, *a, **k: _StubModel()))
+    monkeypatch.setattr(server, "SystemOneEngine", lambda model, cfg: _RacingEngine())
+
+    app = server.create_app("checkpoints/does-not-exist", device="cpu")
+    client = TestClient(app)
+    payload = {"state": "x", "questions": {"q": {"type": "noul", "instructions": "y"}}}
+
+    def _post():
+        return client.post("/v1/systemone", json=payload)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f1 = pool.submit(_post)
+        # Only release once we have observed the first request inside the engine,
+        # so the second request has a chance to race in while the first is held.
+        assert enter.wait(timeout=2.0), "first request never entered the engine"
+        f2 = pool.submit(_post)
+        # Give the second request a moment to reach evaluate() if nothing serialises it.
+        threading.Event().wait(0.2)
+        release.set()
+        r1, r2 = f1.result(timeout=5.0), f2.result(timeout=5.0)
+
+    assert r1.status_code == 200 and r2.status_code == 200
+    assert peak < 2, (
+        f"two requests entered the engine concurrently (peak={peak}); "
+        "GPU calls must be serialised to avoid the MPS crash"
+    )
 
 
 def test_too_many_options_returns_422(monkeypatch):
